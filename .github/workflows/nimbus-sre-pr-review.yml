@@ -56,7 +56,7 @@ jobs:
               echo "  PASS: No obvious secret patterns in diff."
             fi
             echo ""
-            echo "==> For full SRE review, see Cursor Automation or invoke @nimbus-sre-pr-review."
+            echo "==> For full SRE review, see Cursor Automation or invoke @nimbus-sre-pr-review only if cursor integration is available"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
