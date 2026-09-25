@@ -1,0 +1,113 @@
+# Triggered on every new PR and on new commits to an open PR.
+# Posts Level-1 validation results as a PR comment.
+#
+# For full AI SRE review (secret scan reasoning, Nimbus config, prod risk),
+# also set up a Cursor Automation — see AGENTS.md.
+
+name: Nimbus SRE PR Review (Level-1)
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  level1-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch origin "${{ github.base_ref }}"
+
+      - name: Run Level-1 validation
+        id: validate
+        run: |
+          set -o pipefail
+          BASE="origin/${{ github.base_ref }}"
+          {
+            echo 'report<<EOF'
+            echo "==> Repository: se-wdpr-infrastructure/nimbus_deploy"
+            echo "==> PR: #${{ github.event.pull_request.number }} (${{ github.head_ref }} -> ${{ github.base_ref }})"
+            echo "==> Diff: ${BASE}...HEAD"
+            echo ""
+            git diff --name-status "${BASE}...HEAD" || true
+            echo ""
+            echo "==> JSON validation:"
+            git diff --name-only "${BASE}...HEAD" | while read -r f; do
+              [[ "$f" == *.json ]] || continue
+              if python3 -m json.tool "$f" > /dev/null 2>&1; then
+                echo "  PASS: $f"
+              else
+                echo "  FAIL: $f"
+              fi
+            done
+            echo ""
+            echo "==> Secret scan (diff only):"
+            if git diff "${BASE}...HEAD" | grep -Ein '(password|secret|token|api[_-]?key|private[_-]?key|credential|aws_access_key)' | grep -Ev 'splunk_token.*<%=' | head -20; then
+              echo "  WARN: Potential secret patterns — manual review required."
+            else
+              echo "  PASS: No obvious secret patterns in diff."
+            fi
+            echo ""
+            echo "==> For full SRE review, see Cursor Automation or invoke @nimbus-sre-pr-review."
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- nimbus-sre-level1-review -->';
+            const report = `${{ steps.validate.outputs.report }}`;
+            const body = [
+              marker,
+              '## Nimbus SRE Level-1 PR Review (automated)',
+              '',
+              'This is automated script validation only. **Human SRE approval is still required.**',
+              '',
+              'For full agent review, invoke `@nimbus-sre-pr-review` in Cursor or configure a Cursor Automation.',
+              '',
+              '<details>',
+              '<summary>Validation output</summary>',
+              '',
+              '```',
+              report,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+
+            const { owner, repo, number } = context.issue;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: number,
+              per_page: 100,
+            });
+
+            const existing = comments.find((c) =>
+              c.user.type === 'Bot' && c.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: number,
+                body,
+              });
+            }
