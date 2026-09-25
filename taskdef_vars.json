@@ -1,0 +1,112 @@
+{
+  "cpu": 800,
+  "memory": 6000,
+  "bag": "gam",
+  "image_url": "amazonaws.com/profile/profilem",
+  "environment": [
+    {
+      "name": "JAVA_OPTS",
+      "value": ""
+    },
+    {
+      "name": "PROFILER_CONTROLLER_HOST_NAME",
+      "value": "disney-preprod.saas.appdynamics.com"
+    },
+    {
+      "name": "PROFILER_CONTROLLER_PORT",
+      "value": "80"
+    },
+    {
+      "name": "PROFILER_CONTROLLER_SSL_ENABLED",
+      "value": "false"
+    },
+    {
+      "name": "PROFILER_APP_NAME",
+      "value": "latest_profile-ui_aws"
+    },
+    {
+      "name": "PROFILER_TIER_NAME",
+      "value": "core_profile-svc"
+    },
+    {
+      "name": "DEPLOY_ENVIRONMENT",
+      "value": "LATEST"
+    },
+    {
+      "name": "REFERENCE_ENVIRONMENT",
+      "value": "LATEST"
+    },
+    {
+      "name": "SSL_KEY_STORE-DINE",
+      "value": "client-keystor.p12"
+    },
+    {
+      "name": "SSL_KEY_STORE_TYPE-DINE",
+      "value": "PKCS12"
+    },
+    {
+      "name": "SSL_TRUST_STORE-DINE",
+      "value": "stage.jks"
+    },
+    {
+      "name": "SSL_KEY_STORE_EAI",
+      "value": "Iabc.p12"
+    },
+    {
+      "name": "SSL_KEY_STORE_TYPE-EAI",
+      "value": "PKCS12"
+    },
+    {
+      "name": "JASYPT_KEY_STORE_PASS",
+      "value": "testWdproApiKeystore01"
+    },
+    {
+      "name": "STUB_SOURCE_DIR",
+      "value": "./stubs/"
+    },
+    {
+      "name": "affiliation.geographic.name",
+      "value": "FL_RESIDENT,CAL_RESIDENT,NOCAL_RESIDENT,SOCAL_RESIDENT,TX_RESIDENT,BAJA_RESIDENT,CANADA_RESIDENT"
+    },
+    {
+      "name": "affilaition.geographic.country",
+      "value": "US,US,US,US,US,MX,CA"
+    },
+    {
+      "name": "VAULT_ROLE",
+      "value": "gam-profile-svc-usw2-latest"
+    },
+    {
+      "name": "VAULT_REFRESH_PERIOD",
+      "value": "0"
+    },
+    {
+      "name": "CONSUL_HOST",
+      "value": "https://latest.consul-usw2.wdprapps.disney.com"
+    },
+    {
+      "name": "cruisebooking.quoteReservation.url",
+      "value": "/quote-reservation/validate"
+    },
+    {
+      "name": "cruisesales.cruiseSailing.url",
+      "value": "/view-assembly/cruise-sailings/{cruiseSailingID};destination=DCL?region=intl&view=itinerary"
+    },
+    {
+      "name": "mq.rabbit.dlr.cluster.toggle",
+      "value": "true"
+    },
+    {
+      "name": "disney.streaming.aff.toggle",
+      "value": "true"
+    },
+    {
+      "name": "wdpro.product.ticketFinder.path",
+      "value": "https://latest.lexvas-wdw.wdprapps.disney.com/lexicon-view-assembler-service/product-finder"
+    },
+    {
+      "name": "dlr.aggregated.affiliation.toggle",
+      "value": "true"
+    }
+  ]
+}

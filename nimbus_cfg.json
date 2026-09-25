@@ -1,0 +1,118 @@
+{
+  "profile": "wdpr-gam-dev",	
+  "cluster_name": "wdpr-gam-usw2-lst",
+  "task_family": "profile-svc-latest",
+  "awslogs_group" : "wdpr-gam--usw2-profile-svc-lst",
+  "bag": "gam",
+  "app_name": "profile-svc",
+  "region": "us-west-2",
+  "lb_type": "alb",
+  "lb_name_light": "",
+  "lb_target_group_light": "",
+  "multiple_target_group_deployment": true,
+  "target_groups_light": [
+    {
+      "load_balancer": "",
+      "target_group": "",
+      "container_name": "profile-svc",
+      "container_port": 8080
+    },
+    {
+      "load_balancer": "",
+      "target_group": "",
+      "container_name": "profile-svc",
+      "container_port": 8080
+    }
+  ],
+  "target_groups_dark": [
+    {
+      "load_balancer": "",
+      "target_group": "",
+      "container_name": "profile-svc",
+      "container_port": 8080
+    },
+    {
+      "load_balancer": "",
+      "target_group": "",
+      "container_name": "profile-svc",
+      "container_port": 8080
+    }
+  ],
+  "iam_role": "wdpr-gam--usw2-lst_role",
+  "service_count": 2,
+  "host_port": 0,
+  "container_port": 8080,
+  "wait_max_attempts": 60,
+  "wait_delay_sec": 30,
+  "rolling_max_percent": 200,
+  "rolling_healthy_percent": 100,
+  "health_check_grace_period": 180,
+  "service_autoscaling_enabled": true,
+  "service_autoscale_max": 6,
+  "service_autoscale_min": 2,
+  "service_autoscale_alarm": "RequestCountPerTarget",
+  "service_autoscale_namespace": "AWS/ApplicationELB",
+  "service_autoscale_metrics": [
+    {
+      "Id": "m1",
+      "ReturnData": false,
+      "metric_stat": {
+        "metric": {
+          "namespace": "AWS/ApplicationELB",
+          "metricName": "RequestCountPerTarget",
+          "dimensions": [
+            {
+              "name": "LoadBalancer",
+              "value": "app//"
+            },
+            {
+              "name": "TargetGroup",
+              "value": "targetgroup//"
+            }
+          ]
+        },
+        "period": 60,
+        "stat": "Sum"
+      }
+    },
+    {
+      "id": "m2",
+      "return_data": false,
+      "metric_stat": {
+        "metric": {
+          "metric_name": "RequestCountPerTarget",
+          "namespace": "AWS/ApplicationELB",
+          "dimensions": [
+            {
+              "name": "LoadBalancer",
+              "value": "app//df633c49fcd5df10"
+            },
+            {
+              "name": "TargetGroup",
+              "value": "targetgroup//xyz123"
+            }
+          ]
+        },
+        "period": 60,
+        "stat": "Sum"
+      }
+    },
+    {
+      "id": "t1",
+      "return_data": true,
+      "expression": "SUM(METRICS())"
+    }
+  ],
+  "service_autoscale_y_axis_unit": "None",
+  "service_autoscale_iam_role": "ecsAutoscaleRole",
+  "service_autoscale_low_threshold": 3000,
+  "service_autoscale_high_threshold": 5000,
+  "service_autoscale_cooldown": 300,
+  "service_autoscale_increment_count": 4,
+  "service_autoscale_decrement_count": 2,
+  "service_autoscale_scale_up_eval_periods": 5,
+  "service_autoscale_scale_down_eval_periods": 15,
+  "service_autoscale_scale_up_period": 60,
+  "service_autoscale_scale_down_period": 60,
+  "placement_strategy": [{"type":"spread","field":"host"}]
+}
