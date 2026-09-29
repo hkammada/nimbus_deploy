@@ -12,14 +12,6 @@ on:
         description: "Pull request number to merge"
         required: true
         type: string
-      merge_method:
-        description: "Merge method"
-        required: true
-        type: choice
-        options:
-          - squash
-          - merge
-          - rebase
       expected_head_sha:
         description: "Optional — merge only if PR head matches this SHA (from review)"
         required: false
@@ -163,24 +155,15 @@ jobs:
             exit 1
           fi
 
-      - name: Merge pull request
+      - name: Merge pull request (merge commit)
         id: merge
-        run: |
-          case "${{ inputs.merge_method }}" in
-            squash)  FLAGS=(--squash) ;;
-            merge)   FLAGS=(--merge) ;;
-            rebase)  FLAGS=(--rebase) ;;
-            *) echo "::error::Unknown merge_method"; exit 1 ;;
-          esac
-
-          gh pr merge "$PR" "${FLAGS[@]}"
+        run: gh pr merge "$PR" --merge
 
       - name: Post merge audit comment
         if: success()
         uses: actions/github-script@v7
         env:
           PR_NUM: ${{ inputs.pr_number }}
-          METHOD: ${{ inputs.merge_method }}
           CHANGE_REF: ${{ inputs.change_reference }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         with:
@@ -192,7 +175,7 @@ jobs:
               '## Nimbus SRE scheduled merge (completed)',
               '',
               `- **Merged by workflow:** @${context.actor}`,
-              `- **Method:** \`${process.env.METHOD}\``,
+              `- **Method:** \`merge commit\``,
               `- **Head SHA at merge:** \`${process.env.HEAD_SHA}\``,
               `- **Change reference:** ${ref}`,
               '',
