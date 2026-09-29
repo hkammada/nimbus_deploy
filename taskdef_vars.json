@@ -6,7 +6,7 @@
   "environment": [
     {
       "name": "JAVA_OPTS",
-      "value": ""
+      "value": "",
     },
     {
       "name": "PROFILER_CONTROLLER_HOST_NAME",
