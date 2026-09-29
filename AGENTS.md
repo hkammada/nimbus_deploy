@@ -118,14 +118,81 @@ Run locally before opening a PR or to pre-check a branch:
 .cursor/skills/nimbus-sre-pr-review/scripts/validate-pr.sh --branch fix/my-branch
 ```
 
-## Scheduled merge
+## Scheduled merge (GitHub Actions — `workflow_dispatch`)
 
-If the agent returns **PASS**, it will ask for:
+After Level-1 checks pass and **human SRE approves** the PR on GitHub, merge at the agreed change window by running the **Nimbus SRE Scheduled Merge** workflow manually (GitHub does not wait for a clock time — the SRE starts the workflow when the window opens).
 
-- Merge date, time, and time zone (e.g. `08 Aug 2026, 22:30 IST`)
-- Merge method: `squash`, `merge commit`, or `rebase`
+Workflow file: `.github/workflows/nimbus-sre-scheduled-merge.yml`
 
-Scheduled merge proceeds only when branch protection, approvals, and checks are satisfied.
+### One-time activation on github.disney.com
+
+1. **Merge both workflow files** to the default branch (`main` or `master`):
+   - `.github/workflows/nimbus-sre-pr-review.yml`
+   - `.github/workflows/nimbus-sre-scheduled-merge.yml`
+
+2. **Repo → Settings → Actions → General**
+   - Enable Actions (if not already).
+   - Under **Workflow permissions**, choose **Read and write permissions** (needed for `gh pr merge` and PR comments).
+
+3. **Create deployment environment** (second approval gate):
+   - **Settings → Environments → New environment**
+   - Name: `nimbus-sre-merge`
+   - Enable **Required reviewers** and add your SRE team (or yourself for testing).
+   - Optional: restrict to `main` / `master` only.
+
+4. **Branch protection** on the default branch (recommended):
+   - Require pull request reviews before merging.
+   - Require status checks (include **Nimbus SRE PR Review (Level-1)** when ready).
+   - Do not allow bypassing protections for normal users.
+
+5. **Who can run workflows**
+   - **Settings → Actions → General → Fork pull request workflows** — follow org policy.
+   - Ensure SREs have permission to run **workflow_dispatch** (default: write access to the repo).
+
+6. **Self-hosted runners** (if `ubuntu-latest` is unavailable):
+   - Change `runs-on: ubuntu-latest` to your Disney runner label in both workflow files.
+
+### How to merge an approved PR (each change)
+
+1. Confirm on the PR:
+   - Human review **Approved**
+   - Required checks **green** (including Level-1 review)
+   - No merge conflicts
+
+2. At the scheduled change window, open:
+   `https://github.disney.com/<org>/<repo>/actions/workflows/nimbus-sre-scheduled-merge.yml`
+
+3. Click **Run workflow**
+
+4. Fill inputs:
+
+   | Input | Example |
+   |-------|---------|
+   | `pr_number` | `126602` |
+   | `merge_method` | `squash` |
+   | `expected_head_sha` | Copy from PR **Commits** (optional but recommended) |
+   | `change_reference` | `CTASK12781687` |
+   | `confirm_human_approval` | `true` |
+
+5. Approve the **nimbus-sre-merge** environment if prompted.
+
+6. Outcome:
+   - **Success** — PR merged; audit comment on the PR.
+   - **Failure** — no merge; blocked comment with link to logs.
+
+### What the merge workflow verifies
+
+- PR is open
+- No `CHANGES_REQUESTED` / `REVIEW_REQUIRED`
+- No failing required checks (best effort via API)
+- No merge conflicts
+- Changed `*.json` files still parse
+- Optional head SHA unchanged since review
+- Branch protection still enforced by GitHub (`gh pr merge` without admin bypass)
+
+### Disable the environment gate (testing only)
+
+In `nimbus-sre-scheduled-merge.yml`, remove the line `environment: nimbus-sre-merge` and commit. Not recommended for production.
 
 ## Scope
 
