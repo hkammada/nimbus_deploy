@@ -1,8 +1,6 @@
 # Triggered on every new PR and on new commits to an open PR.
 # Posts Level-1 validation results as a PR comment.
-#
-# For full AI SRE review (secret scan reasoning, Nimbus config, prod risk),
-# also set up a Cursor Automation — see AGENTS.md.
+# After human approval, merge via: .github/workflows/nimbus-sre-scheduled-merge.yml (workflow_dispatch)
 
 name: Nimbus SRE PR Review (Level-1)
 
@@ -56,7 +54,7 @@ jobs:
               echo "  PASS: No obvious secret patterns in diff."
             fi
             echo ""
-            echo "==> For full SRE review, see Cursor Automation or invoke @nimbus-sre-pr-review only if cursor integration is available"
+            echo "==> After human approval, run Actions workflow: Nimbus SRE Scheduled Merge"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -70,9 +68,9 @@ jobs:
               marker,
               '## Nimbus SRE Level-1 PR Review (automated)',
               '',
-              'This is automated script validation only. **Human SRE approval is still required.**',
+              'Automated Level-1 validation only. **Human SRE approval is still required before merge.**',
               '',
-              'For full agent review, invoke `@nimbus-sre-pr-review` in Cursor or configure a Cursor Automation.',
+              'When approved, an SRE runs **Actions → Nimbus SRE Scheduled Merge** at the agreed change window.',
               '',
               '<details>',
               '<summary>Validation output</summary>',
