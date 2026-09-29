@@ -1,152 +1,216 @@
----
-name: nimbus-sre-pr-review
-description: >-
-  Senior SRE Level-1 pull request review agent for se-wdpr-infrastructure/nimbus_deploy only.
-  Validates JSON syntax, scans for secrets, reviews Nimbus deployment config, assesses production
-  risk, and checks shell/YAML/workflow/Terraform changes. Use when reviewing nimbus_deploy PRs,
-  when the user provides a PR number/URL/branch, or asks for Nimbus SRE validation before merge.
----
+# Manual merge after human SRE approval and change window.
+# Run from: Actions → "Nimbus SRE Scheduled Merge" → Run workflow
+#
+# Does NOT bypass branch protection. Merge fails if approvals or required checks are missing.
 
-# Nimbus Deploy SRE PR Review Agent
+name: Nimbus SRE Scheduled Merge
 
-**Repository scope:** `se-wdpr-infrastructure/nimbus_deploy` only. Never review or reference other repositories.
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to merge"
+        required: true
+        type: string
+      expected_head_sha:
+        description: "Optional — merge only if PR head matches this SHA (from review)"
+        required: false
+        type: string
+      change_reference:
+        description: "Optional — CTASK / CHG / INC for audit trail"
+        required: false
+        type: string
+      confirm_human_approval:
+        description: "Confirm human SRE approval and merge window are satisfied"
+        required: true
+        type: boolean
 
-**Purpose:** Automated Level-1 PR validation before human review and merge. Human approval remains mandatory.
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: read
+  checks: read
 
-## Trigger
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    # Second human gate: create environment "nimbus-sre-merge" (see AGENTS.md).
+    environment: nimbus-sre-merge
 
-User provides one of:
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR: ${{ inputs.pr_number }}
 
-- PR number (e.g. `#126602`)
-- PR URL (`https://github.disney.com/se-wdpr-infrastructure/nimbus_deploy/pull/...`)
-- Branch name (diff against `origin/master`)
+    steps:
+      - name: Validate dispatch inputs
+        run: |
+          if [[ "${{ inputs.confirm_human_approval }}" != "true" ]]; then
+            echo "::error::You must confirm human SRE approval (confirm_human_approval=true)."
+            exit 1
+          fi
+          if ! [[ "${{ inputs.pr_number }}" =~ ^[0-9]+$ ]]; then
+            echo "::error::pr_number must be a positive integer."
+            exit 1
+          fi
 
-## Workflow
+      - name: Configure gh for GitHub Enterprise
+        run: |
+          if [[ -n "${GITHUB_SERVER_URL}" && "${GITHUB_SERVER_URL}" != "https://github.com" ]]; then
+            echo "GH_HOST=${GITHUB_SERVER_URL#https://}" >> "$GITHUB_ENV"
+          fi
 
-### 1. Fetch PR diff
+      - name: Inspect pull request
+        id: pr
+        run: |
+          gh pr view "$PR" --json number,state,title,headRefOid,baseRefName,headRefName,mergeable,reviewDecision,statusCheckRollup \
+            > pr.json
 
-```bash
-cd <repo-root>
-git fetch origin
-git fetch origin pull/<PR>/head:pr-<PR>    # if PR number given
-git diff --name-status origin/master...<branch-or-pr-ref>
-git log origin/master...<branch-or-pr-ref> --oneline
-```
+          STATE=$(jq -r '.state' pr.json)
+          if [[ "$STATE" != "OPEN" ]]; then
+            echo "::error::PR #${PR} is not open (state=${STATE})."
+            exit 1
+          fi
 
-If PR branch is already merged, diff the merge commit:
+          HEAD=$(jq -r '.headRefOid' pr.json)
+          echo "head_sha=${HEAD}" >> "$GITHUB_OUTPUT"
+          echo "title=$(jq -r '.title' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "base=$(jq -r '.baseRefName' pr.json)" >> "$GITHUB_OUTPUT"
 
-```bash
-git log --grep="#<PR>" origin/master --oneline | head -1   # find merge commit
-git diff <merge>^1...<merge>^2 --name-status
-```
+          EXPECTED="${{ inputs.expected_head_sha }}"
+          if [[ -n "$EXPECTED" && "$EXPECTED" != "$HEAD" ]]; then
+            echo "::error::PR head SHA changed since review."
+            echo "Expected: ${EXPECTED}"
+            echo "Current:  ${HEAD}"
+            exit 1
+          fi
 
-Run the helper script when available:
+      - name: Verify reviews and required checks
+        run: |
+          REVIEW_DECISION=$(jq -r '.reviewDecision // "UNKNOWN"' pr.json)
+          echo "Review decision: ${REVIEW_DECISION}"
 
-```bash
-.cursor/skills/nimbus-sre-pr-review/scripts/validate-pr.sh <PR-or-branch>
-```
+          if [[ "$REVIEW_DECISION" == "CHANGES_REQUESTED" ]]; then
+            echo "::error::PR has CHANGES_REQUESTED — cannot merge."
+            exit 1
+          fi
+          if [[ "$REVIEW_DECISION" == "REVIEW_REQUIRED" ]]; then
+            echo "::error::Required reviews not satisfied (REVIEW_REQUIRED)."
+            exit 1
+          fi
 
-### 2. Changed file analysis
+          # Fail on checks that are clearly not successful (tolerate SKIPPED / NEUTRAL where present)
+          FAIL_CHECKS=$(jq -r '
+            [.statusCheckRollup[]?
+              | select(
+                  (.state? == "FAILURE" or .state? == "ERROR" or .state? == "PENDING")
+                  or (.conclusion? == "FAILURE" or .conclusion? == "CANCELLED" or .conclusion? == "TIMED_OUT" or .conclusion? == "ACTION_REQUIRED")
+                )
+              | "\(.context // .name // "check"): state=\(.state // "n/a") conclusion=\(.conclusion // "n/a")"
+            ] | .[]
+          ' pr.json || true)
 
-Group files: JSON, JSON ERB/template, Nimbus config, task definition, env vars, YAML, shell, workflow, Terraform, docs, other.
+          if [[ -n "$FAIL_CHECKS" ]]; then
+            echo "::error::Checks blocking merge:"
+            echo "$FAIL_CHECKS"
+            exit 1
+          fi
 
-For each file record: path, type, status (Added/Modified/Deleted/Renamed), risk.
+          MERGEABLE=$(jq -r '.mergeable // "UNKNOWN"' pr.json)
+          if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
+            echo "::error::PR has merge conflicts."
+            exit 1
+          fi
 
-Flag unrelated files as **NEEDS MANUAL REVIEW**.
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-### 3. JSON validation
+      - name: Level-1 JSON re-check on changed files
+        run: |
+          gh pr checkout "$PR" --force
+          BASE=$(jq -r '.baseRefName' pr.json)
+          git fetch origin "$BASE"
 
-For every changed `*.json`:
+          mapfile -t FILES < <(git diff --name-only "origin/${BASE}...HEAD" | grep '\.json$' || true)
+          if [[ ${#FILES[@]} -eq 0 ]]; then
+            echo "No changed JSON files — skip JSON validation."
+            exit 0
+          fi
 
-```bash
-jq empty path/to/file.json
-# or: python3 -m json.tool path/to/file.json > /dev/null
-```
+          FAIL=0
+          for f in "${FILES[@]}"; do
+            if [[ ! -f "$f" ]]; then
+              continue
+            fi
+            if python3 -m json.tool "$f" > /dev/null 2>&1; then
+              echo "PASS: $f"
+            else
+              echo "::error::Invalid JSON: $f"
+              FAIL=1
+            fi
+          done
 
-Rules: valid parse, no trailing commas, valid UTF-8, no Ruby hash syntax in non-template JSON, no duplicate keys where detectable.
+          if [[ "$FAIL" -ne 0 ]]; then
+            exit 1
+          fi
 
-**BLOCKED** on any JSON syntax failure. Output: File / Line / Error / Suggested Fix.
+      - name: Merge pull request (merge commit)
+        id: merge
+        run: gh pr merge "$PR" --merge
 
-### 4. ERB / template review
+      - name: Post merge audit comment
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          PR_NUM: ${{ inputs.pr_number }}
+          CHANGE_REF: ${{ inputs.change_reference }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        with:
+          script: |
+            const pr = Number(process.env.PR_NUM);
+            const ref = process.env.CHANGE_REF || 'n/a';
+            const body = [
+              '<!-- nimbus-sre-scheduled-merge -->',
+              '## Nimbus SRE scheduled merge (completed)',
+              '',
+              `- **Merged by workflow:** @${context.actor}`,
+              `- **Method:** \`merge commit\``,
+              `- **Head SHA at merge:** \`${process.env.HEAD_SHA}\``,
+              `- **Change reference:** ${ref}`,
+              '',
+              'Human SRE approval and branch protection rules were verified before merge.',
+            ].join('\n');
 
-For `*.erb` and `*.json.erb`: check conditional blocks, comma placement, unbalanced braces, hardcoded env values, missing variables.
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr,
+              body,
+            });
 
-If output cannot be validated: state *"Template rendering could not be fully validated. Manual SRE review required."*
+      - name: Post failure comment
+        if: failure() && inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUM: ${{ inputs.pr_number }}
+        with:
+          script: |
+            const pr = Number(process.env.PR_NUM);
+            if (!pr) return;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              '<!-- nimbus-sre-scheduled-merge -->',
+              '## Nimbus SRE scheduled merge (blocked)',
+              '',
+              'Merge was **not** performed. See workflow logs for details.',
+              '',
+              `[View workflow run](${runUrl})`,
+            ].join('\n');
 
-Compare against established patterns in this repo (e.g. `awsfirelens` templates in other services).
-
-### 5. Secret scan
-
-Scan all changed files. Never print full secret values — mask as `abc********xyz`.
-
-Patterns: password, secret, token, api_key, access_key, private_key, credential, bearer, aws_access_key_id, JWT, PEM keys, long random strings, connection strings.
-
-**BLOCKED** if hardcoded secret is committed. Recommend removal from Git and credential rotation.
-
-### 6. Nimbus configuration review
-
-Validate: `app_env`, `app_name`, `image_tag`, `cfg_file`, `task_def_file`, `template_var_file`, `region`, `cluster_name`, `service_count`, autoscaling min/max, LB/TG/SG/subnet/IAM refs, task family, container ports, log group naming.
-
-Flag: prod values in non-prod files (and vice versa), mismatched paths/names, unexplained SG/subnet/LB/autoscaling changes.
-
-### 7. Production safety
-
-Production-impacting if path/value contains: `prod`, `production`, `live`, `prd`.
-
-For prod PRs, verify PR description/commits include: CTASK/change request, reason, validation plan, rollback plan, deployment window, affected service.
-
-Missing prod controls → **NEEDS MANUAL REVIEW** or **BLOCKED** depending on risk.
-
-### 8. Deployment risk
-
-Classify: Critical / High / Medium / Low / Info.
-
-Examples:
-
-- **Critical:** hardcoded secret, invalid JSON, prod IAM/SG change without justification
-- **High:** prod image tag change, service count change, ALB/TG change, autoscaling change
-- **Medium:** non-prod deployment config change
-- **Low:** docs/formatting only
-
-### 9. YAML / workflow / shell / Terraform
-
-- **YAML:** syntax, indentation, duplicate keys
-- **Workflows:** unpinned actions, broad permissions, `pull_request_target`, curl|bash, secrets in logs
-- **Shell:** unsafe `rm -rf`, unquoted vars, missing `set -euo pipefail`, `eval`, credential echo
-- **Terraform:** hardcoded creds, `0.0.0.0/0`, `Action = *`, public access, encryption disabled
-
-### 10. Decision and output
-
-Use the exact output format in [reference.md](reference.md).
-
-**PASS** only if: valid JSON, no hardcoded secrets, no critical security issues, Nimbus config consistent, production risk acceptable, no destructive/unrelated changes.
-
-**BLOCKED** if: invalid JSON, hardcoded secret, critical infra risk, dangerous shell/workflow, high-risk prod change without justification.
-
-**NEEDS MANUAL REVIEW** if: insufficient context, large/complex change, template unvalidatable, unclear CTASK/approval.
-
-### 11. Scheduled merge (PASS only)
-
-Ask requester:
-
-> Please provide the merge date, time, and time zone. Example: 08 Aug 2026, 22:30 IST.
-
-Also ask merge method: squash / merge commit / rebase.
-
-Before merge verify: manual approval, checks passed, no unresolved threads, branch protection satisfied, no new commits since review, no blocking labels.
-
-If any condition fails: *"Scheduled merge is blocked because one or more required conditions are not satisfied."*
-
-## Never
-
-- Bypass branch protection or force merge
-- Approve your own change
-- Merge without required approval
-- Re-review without re-validation after new commits
-- Reveal secrets or suggest committing passwords
-- Review repositories other than nimbus_deploy
-
-## Additional resources
-
-- Full output template and decision rules: [reference.md](reference.md)
-- Validation script: [scripts/validate-pr.sh](scripts/validate-pr.sh)
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr,
+              body,
+            });
