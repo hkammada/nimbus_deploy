@@ -1,0 +1,233 @@
+# Manual merge after human SRE approval and change window.
+# Run from: Actions → "Nimbus SRE Scheduled Merge" → Run workflow
+#
+# Does NOT bypass branch protection. Merge fails if approvals or required checks are missing.
+
+name: Nimbus SRE Scheduled Merge
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to merge"
+        required: true
+        type: string
+      merge_method:
+        description: "Merge method"
+        required: true
+        type: choice
+        options:
+          - squash
+          - merge
+          - rebase
+      expected_head_sha:
+        description: "Optional — merge only if PR head matches this SHA (from review)"
+        required: false
+        type: string
+      change_reference:
+        description: "Optional — CTASK / CHG / INC for audit trail"
+        required: false
+        type: string
+      confirm_human_approval:
+        description: "Confirm human SRE approval and merge window are satisfied"
+        required: true
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: read
+  checks: read
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    # Second human gate: create environment "nimbus-sre-merge" (see AGENTS.md).
+    environment: nimbus-sre-merge
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR: ${{ inputs.pr_number }}
+
+    steps:
+      - name: Validate dispatch inputs
+        run: |
+          if [[ "${{ inputs.confirm_human_approval }}" != "true" ]]; then
+            echo "::error::You must confirm human SRE approval (confirm_human_approval=true)."
+            exit 1
+          fi
+          if ! [[ "${{ inputs.pr_number }}" =~ ^[0-9]+$ ]]; then
+            echo "::error::pr_number must be a positive integer."
+            exit 1
+          fi
+
+      - name: Configure gh for GitHub Enterprise
+        run: |
+          if [[ -n "${GITHUB_SERVER_URL}" && "${GITHUB_SERVER_URL}" != "https://github.com" ]]; then
+            echo "GH_HOST=${GITHUB_SERVER_URL#https://}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Inspect pull request
+        id: pr
+        run: |
+          gh pr view "$PR" --json number,state,title,headRefOid,baseRefName,headRefName,mergeable,reviewDecision,statusCheckRollup \
+            > pr.json
+
+          STATE=$(jq -r '.state' pr.json)
+          if [[ "$STATE" != "OPEN" ]]; then
+            echo "::error::PR #${PR} is not open (state=${STATE})."
+            exit 1
+          fi
+
+          HEAD=$(jq -r '.headRefOid' pr.json)
+          echo "head_sha=${HEAD}" >> "$GITHUB_OUTPUT"
+          echo "title=$(jq -r '.title' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "base=$(jq -r '.baseRefName' pr.json)" >> "$GITHUB_OUTPUT"
+
+          EXPECTED="${{ inputs.expected_head_sha }}"
+          if [[ -n "$EXPECTED" && "$EXPECTED" != "$HEAD" ]]; then
+            echo "::error::PR head SHA changed since review."
+            echo "Expected: ${EXPECTED}"
+            echo "Current:  ${HEAD}"
+            exit 1
+          fi
+
+      - name: Verify reviews and required checks
+        run: |
+          REVIEW_DECISION=$(jq -r '.reviewDecision // "UNKNOWN"' pr.json)
+          echo "Review decision: ${REVIEW_DECISION}"
+
+          if [[ "$REVIEW_DECISION" == "CHANGES_REQUESTED" ]]; then
+            echo "::error::PR has CHANGES_REQUESTED — cannot merge."
+            exit 1
+          fi
+          if [[ "$REVIEW_DECISION" == "REVIEW_REQUIRED" ]]; then
+            echo "::error::Required reviews not satisfied (REVIEW_REQUIRED)."
+            exit 1
+          fi
+
+          # Fail on checks that are clearly not successful (tolerate SKIPPED / NEUTRAL where present)
+          FAIL_CHECKS=$(jq -r '
+            [.statusCheckRollup[]?
+              | select(
+                  (.state? == "FAILURE" or .state? == "ERROR" or .state? == "PENDING")
+                  or (.conclusion? == "FAILURE" or .conclusion? == "CANCELLED" or .conclusion? == "TIMED_OUT" or .conclusion? == "ACTION_REQUIRED")
+                )
+              | "\(.context // .name // "check"): state=\(.state // "n/a") conclusion=\(.conclusion // "n/a")"
+            ] | .[]
+          ' pr.json || true)
+
+          if [[ -n "$FAIL_CHECKS" ]]; then
+            echo "::error::Checks blocking merge:"
+            echo "$FAIL_CHECKS"
+            exit 1
+          fi
+
+          MERGEABLE=$(jq -r '.mergeable // "UNKNOWN"' pr.json)
+          if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
+            echo "::error::PR has merge conflicts."
+            exit 1
+          fi
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Level-1 JSON re-check on changed files
+        run: |
+          gh pr checkout "$PR" --force
+          BASE=$(jq -r '.baseRefName' pr.json)
+          git fetch origin "$BASE"
+
+          mapfile -t FILES < <(git diff --name-only "origin/${BASE}...HEAD" | grep '\.json$' || true)
+          if [[ ${#FILES[@]} -eq 0 ]]; then
+            echo "No changed JSON files — skip JSON validation."
+            exit 0
+          fi
+
+          FAIL=0
+          for f in "${FILES[@]}"; do
+            if [[ ! -f "$f" ]]; then
+              continue
+            fi
+            if python3 -m json.tool "$f" > /dev/null 2>&1; then
+              echo "PASS: $f"
+            else
+              echo "::error::Invalid JSON: $f"
+              FAIL=1
+            fi
+          done
+
+          if [[ "$FAIL" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Merge pull request
+        id: merge
+        run: |
+          case "${{ inputs.merge_method }}" in
+            squash)  FLAGS=(--squash) ;;
+            merge)   FLAGS=(--merge) ;;
+            rebase)  FLAGS=(--rebase) ;;
+            *) echo "::error::Unknown merge_method"; exit 1 ;;
+          esac
+
+          gh pr merge "$PR" "${FLAGS[@]}"
+
+      - name: Post merge audit comment
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          PR_NUM: ${{ inputs.pr_number }}
+          METHOD: ${{ inputs.merge_method }}
+          CHANGE_REF: ${{ inputs.change_reference }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        with:
+          script: |
+            const pr = Number(process.env.PR_NUM);
+            const ref = process.env.CHANGE_REF || 'n/a';
+            const body = [
+              '<!-- nimbus-sre-scheduled-merge -->',
+              '## Nimbus SRE scheduled merge (completed)',
+              '',
+              `- **Merged by workflow:** @${context.actor}`,
+              `- **Method:** \`${process.env.METHOD}\``,
+              `- **Head SHA at merge:** \`${process.env.HEAD_SHA}\``,
+              `- **Change reference:** ${ref}`,
+              '',
+              'Human SRE approval and branch protection rules were verified before merge.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr,
+              body,
+            });
+
+      - name: Post failure comment
+        if: failure() && inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUM: ${{ inputs.pr_number }}
+        with:
+          script: |
+            const pr = Number(process.env.PR_NUM);
+            if (!pr) return;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              '<!-- nimbus-sre-scheduled-merge -->',
+              '## Nimbus SRE scheduled merge (blocked)',
+              '',
+              'Merge was **not** performed. See workflow logs for details.',
+              '',
+              `[View workflow run](${runUrl})`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr,
+              body,
+            });
