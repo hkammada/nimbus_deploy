@@ -169,7 +169,6 @@ Workflow file: `.github/workflows/nimbus-sre-scheduled-merge.yml`
    | Input | Example |
    |-------|---------|
    | `pr_number` | `126602` |
-   | `merge_method` | `squash` |
    | `expected_head_sha` | Copy from PR **Commits** (optional but recommended) |
    | `change_reference` | `CTASK12781687` |
    | `confirm_human_approval` | `true` |
