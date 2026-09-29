@@ -140,10 +140,13 @@ Workflow file: `.github/workflows/nimbus-sre-scheduled-merge.yml`
    - Enable **Required reviewers** and add your SRE team (or yourself for testing).
    - Optional: restrict to `main` / `master` only.
 
-4. **Branch protection** on the default branch (recommended):
-   - Require pull request reviews before merging.
-   - Require status checks (include **Nimbus SRE PR Review (Level-1)** when ready).
-   - Do not allow bypassing protections for normal users.
+4. **Branch protection** on the default branch (**required to block merge on failed Level-1**):
+   - **Settings → Branches → Add rule** for `main` / `master`
+   - Enable **Require status checks to pass before merging**
+   - Search and select: **`Nimbus SRE Level-1 PR Review`** (exact job name from the workflow)
+   - Enable **Require pull request reviews before merging** (human approval)
+   - Save — until this check is green, GitHub blocks the **Merge** button
+   - The scheduled merge workflow also refuses to merge if Level-1 is missing or not `SUCCESS`
 
 5. **Who can run workflows**
    - **Settings → Actions → General → Fork pull request workflows** — follow org policy.
