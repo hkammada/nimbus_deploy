@@ -115,6 +115,26 @@ jobs:
             exit 1
           fi
 
+          # Require Nimbus SRE Level-1 check to exist and be successful
+          LEVEL1_STATUS=$(jq -r '
+            [.statusCheckRollup[]?
+              | select(
+                  ((.context // .name // "") | ascii_downcase)
+                  | contains("nimbus sre level-1")
+                )
+            ] | if length == 0 then "MISSING"
+              else (map(.state // .conclusion // "UNKNOWN") | .[0]) end
+          ' pr.json)
+          echo "Level-1 check status: ${LEVEL1_STATUS}"
+          if [[ "$LEVEL1_STATUS" == "MISSING" ]]; then
+            echo "::error::Nimbus SRE Level-1 PR Review check not found — run Level-1 workflow on this PR first."
+            exit 1
+          fi
+          if [[ "$LEVEL1_STATUS" != "SUCCESS" && "$LEVEL1_STATUS" != "success" ]]; then
+            echo "::error::Nimbus SRE Level-1 PR Review must pass before scheduled merge (status=${LEVEL1_STATUS})."
+            exit 1
+          fi
+
           MERGEABLE=$(jq -r '.mergeable // "UNKNOWN"' pr.json)
           if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
             echo "::error::PR has merge conflicts."
