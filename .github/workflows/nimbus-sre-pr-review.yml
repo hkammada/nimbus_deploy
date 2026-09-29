@@ -1,6 +1,6 @@
 # Triggered on every new PR and on new commits to an open PR.
-# Posts Level-1 validation results as a PR comment.
-# After human approval, merge via: .github/workflows/nimbus-sre-scheduled-merge.yml (workflow_dispatch)
+# Fails the check (blocks merge) when JSON validation or secret scan fails.
+# After human approval + green checks, merge via nimbus-sre-scheduled-merge.yml
 
 name: Nimbus SRE PR Review (Level-1)
 
@@ -11,9 +11,11 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  checks: write
 
 jobs:
   level1-review:
+    name: Nimbus SRE Level-1 PR Review
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR head
@@ -27,10 +29,13 @@ jobs:
       - name: Run Level-1 validation
         id: validate
         run: |
-          set -o pipefail
+          set -euo pipefail
           BASE="origin/${{ github.base_ref }}"
+          REPORT_FILE="${RUNNER_TEMP}/level1-report.txt"
+          JSON_FAIL=0
+          SECRET_FAIL=0
+
           {
-            echo 'report<<EOF'
             echo "==> Repository: se-wdpr-infrastructure/nimbus_deploy"
             echo "==> PR: #${{ github.event.pull_request.number }} (${{ github.head_ref }} -> ${{ github.base_ref }})"
             echo "==> Diff: ${BASE}...HEAD"
@@ -38,39 +43,95 @@ jobs:
             git diff --name-status "${BASE}...HEAD" || true
             echo ""
             echo "==> JSON validation:"
-            git diff --name-only "${BASE}...HEAD" | while read -r f; do
-              [[ "$f" == *.json ]] || continue
-              if python3 -m json.tool "$f" > /dev/null 2>&1; then
-                echo "  PASS: $f"
-              else
-                echo "  FAIL: $f"
-              fi
-            done
+          } > "$REPORT_FILE"
+
+          while IFS= read -r f; do
+            [[ -n "$f" ]] || continue
+            [[ "$f" == *.json ]] || continue
+            if [[ ! -f "$f" ]]; then
+              echo "  FAIL: $f (file missing on PR head)" | tee -a "$REPORT_FILE"
+              JSON_FAIL=1
+              continue
+            fi
+            if python3 -m json.tool "$f" > /dev/null 2>&1; then
+              echo "  PASS: $f" | tee -a "$REPORT_FILE"
+            else
+              echo "  FAIL: $f" | tee -a "$REPORT_FILE"
+              JSON_FAIL=1
+            fi
+          done < <(git diff --name-only "${BASE}...HEAD" || true)
+
+          if ! grep -qE '^  (PASS|FAIL):' "$REPORT_FILE"; then
+            echo "  (no changed *.json files)" >> "$REPORT_FILE"
+          fi
+
+          {
             echo ""
             echo "==> Secret scan (diff only):"
-            if git diff "${BASE}...HEAD" | grep -Ein '(password|secret|token|api[_-]?key|private[_-]?key|credential|aws_access_key)' | grep -Ev 'splunk_token.*<%=' | head -20; then
-              echo "  WARN: Potential secret patterns — manual review required."
-            else
-              echo "  PASS: No obvious secret patterns in diff."
-            fi
+          } >> "$REPORT_FILE"
+
+          SECRET_HITS=$(git diff "${BASE}...HEAD" | grep -Ein \
+            '(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|credential|aws_access_key|aws_secret_access_key)' \
+            | grep -Ev 'splunk_token.*<%=' | grep -Ev '"name"[[:space:]]*:[[:space:]]*".*(KEY|TOKEN|SECRET)"' || true)
+
+          if [[ -n "$SECRET_HITS" ]]; then
+            echo "  FAIL: Potential secret patterns in diff (merge blocked):" >> "$REPORT_FILE"
+            echo "$SECRET_HITS" | head -20 >> "$REPORT_FILE"
+            SECRET_FAIL=1
+          else
+            echo "  PASS: No obvious secret patterns in diff." >> "$REPORT_FILE"
+          fi
+
+          {
             echo ""
-            echo "==> After human approval, run Actions workflow: Nimbus SRE Scheduled Merge"
+            echo "==> Result:"
+          } >> "$REPORT_FILE"
+
+          if [[ "$JSON_FAIL" -ne 0 || "$SECRET_FAIL" -ne 0 ]]; then
+            echo "  FAILED — fix issues and push again. Merge is blocked until this check passes." >> "$REPORT_FILE"
+            echo "validation_passed=false" >> "$GITHUB_OUTPUT"
+            echo "json_failed=${JSON_FAIL}" >> "$GITHUB_OUTPUT"
+            echo "secret_failed=${SECRET_FAIL}" >> "$GITHUB_OUTPUT"
+          else
+            echo "  PASSED — human SRE approval still required before scheduled merge." >> "$REPORT_FILE"
+            echo "validation_passed=true" >> "$GITHUB_OUTPUT"
+            echo "json_failed=0" >> "$GITHUB_OUTPUT"
+            echo "secret_failed=0" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo 'report<<EOF'
+            cat "$REPORT_FILE"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
+          if [[ "$JSON_FAIL" -ne 0 || "$SECRET_FAIL" -ne 0 ]]; then
+            echo "::error::Nimbus SRE Level-1 validation failed — merge blocked until fixed."
+            exit 1
+          fi
+
       - name: Post PR comment
+        if: always() && steps.validate.outputs.report != ''
         uses: actions/github-script@v7
+        env:
+          VALIDATION_PASSED: ${{ steps.validate.outputs.validation_passed }}
         with:
           script: |
             const marker = '<!-- nimbus-sre-level1-review -->';
             const report = `${{ steps.validate.outputs.report }}`;
+            const passed = process.env.VALIDATION_PASSED === 'true';
+            const statusLine = passed
+              ? '✅ **PASSED** — automated Level-1 checks succeeded.'
+              : '❌ **FAILED** — merge is **blocked** until this check passes. Fix issues and push again.';
             const body = [
               marker,
               '## Nimbus SRE Level-1 PR Review (automated)',
               '',
-              'Automated Level-1 validation only. **Human SRE approval is still required before merge.**',
+              statusLine,
               '',
-              'When approved, an SRE runs **Actions → Nimbus SRE Scheduled Merge** at the agreed change window.',
+              'Human SRE approval is still required before merge (in addition to this check).',
+              '',
+              'When approved and all checks are green, run **Actions → Nimbus SRE Scheduled Merge**.',
               '',
               '<details>',
               '<summary>Validation output</summary>',
